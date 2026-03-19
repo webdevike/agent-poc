@@ -338,6 +338,38 @@ For feature-flagged customers, who seeds the initial profile.md?
 
 Recommendation: **(b)** for v1 — simple template populated from existing customer table fields. It'll look like the Acme Corp profile in the POC. Context builds from there organically.
 
+## Data Sources
+
+### MongoDB (historic, read-only)
+- ~10 years of HR data — the deep well
+- Agent never queries Mongo directly; materializer handles translation
+- Used for: employee historical records, past events, customer-wide aggregates, old compliance incidents
+- Materializer pulls only what's relevant to the current batch (a handful of queries, not full scans)
+
+### Postgres (operational, read-only for agents)
+- Current employee data, active events, customer configuration
+- Source of batch events (pulled via SQS)
+- Findings are NOT written back to Postgres in v1 — output stays as files on S3
+
+### Data Safety
+- **AWS Bedrock in production** — data never leaves the VPC. Anthropic never sees request/response data.
+- Bedrock provides: encryption via KMS, CloudTrail audit logging, IAM access controls, VPC endpoint (PrivateLink) support
+- No model training on customer data (guaranteed by AWS terms)
+- Direct Anthropic API used only in development with synthetic/anonymized data
+
+## Model Flexibility via Bedrock
+
+Bedrock provides access to multiple model providers beyond Anthropic:
+
+| Provider | Models | Potential Use |
+|---|---|---|
+| Anthropic | Haiku, Sonnet, Opus | Primary — workspace-native tool use |
+| Amazon | Nova Micro, Lite, Pro | Ultra-cheap tier for simple events |
+| Meta | Llama 3.x | Cost optimization, no per-token fees |
+| Mistral | Large, Medium, Small | Alternative for specific tasks |
+
+Nova Micro is ~20x cheaper than Haiku. For routine events where the playbook is essentially a checklist (voluntary resignation, standard benefits enrollment), cheaper models may be sufficient. The workspace pattern makes this easy to test — same brain, same tools, different model parameter.
+
 ## Technical Requirements
 
 - **Runtime:** Node.js (existing team expertise)
@@ -348,7 +380,9 @@ Recommendation: **(b)** for v1 — simple template populated from existing custo
 - **Monitoring:** Existing observability stack + Athena on JSONL logs
 - **Auth/PII:** Bedrock in prod ensures data stays in VPC. Materializer handles PII redaction rules per customer configuration.
 
-## Cost Projections (Shadow Mode)
+## Cost Projections
+
+### LLM Costs (Shadow Mode)
 
 Based on POC results (Haiku, 4 events per batch, ~$0.044 per batch):
 
@@ -358,6 +392,30 @@ Based on POC results (Haiku, 4 events per batch, ~$0.044 per batch):
 | 10 customers | ~500 | $5.50 | $165 |
 
 Shadow mode cost is negligible. This is a low-risk way to validate the approach.
+
+### LLM Costs (Full Scale — 3,000 customers)
+
+| Scenario | Events/day | Model | Daily | Monthly |
+|---|---|---|---|---|
+| All Haiku | 50,000 | Haiku 4.5 | $500 | $15,000 |
+| All Haiku + caching | 50,000 | Haiku 4.5 | $300-350 | $10,000 |
+| Tiered (Haiku + Sonnet) | 50,000 | 85/15 split | $725 | $22,000 |
+| Tiered + caching + batch API | 50,000 | 85/15 split | $350-400 | $11,000 |
+
+### Infrastructure Costs (Full Scale)
+
+| Component | Monthly cost |
+|---|---|
+| S3 storage (context + findings + archives + logs) | $2-5 |
+| K8s compute (spot instances, pods mostly idle waiting on API) | $45 |
+| K8s compute (Fargate alternative) | $360 |
+| Data transfer (all internal to AWS) | $0 |
+| Bedrock premium over direct API | $0 |
+| Additional MongoDB/Postgres read load | $0 (negligible) |
+| Athena queries on JSONL logs | $5-10 |
+| **Total infrastructure** | **~$60-375/month** |
+
+Infrastructure is <3% of total cost. LLM tokens are 97%+ of spend. The only cost lever that matters is model selection, prompt caching, and batch sizing.
 
 ## What This Replaces
 
@@ -377,3 +435,35 @@ We build:
 - S3 directories
 
 The complexity moves from infrastructure code to domain knowledge in playbooks. Infrastructure stays simple and static. Agent behavior changes by editing markdown files and merging PRs.
+
+## Known Limitations and Risks
+
+| Risk | Severity | Mitigation |
+|---|---|---|
+| **Latency floor** (~30-120s per batch) | Medium | Acceptable for batch processing. Keep deterministic pipeline for any real-time needs. |
+| **Non-determinism** (same input may produce slightly different output) | Medium | Temperature 0, treat first run as authoritative, never reprocess for audits. |
+| **Playbook quality** (bad playbook = bad results at scale) | High | Validation pipeline: test new playbooks against historical batches before merging. |
+| **Compounding bad context** (incorrect patterns.md update poisons future runs) | High | Zod validation on output, completeness checks, diff review on context updates, cap file sizes. |
+| **Observability** (harder to monitor than deterministic pipeline) | Medium | JSONL audit logs, Athena dashboards, quality metrics over time. |
+| **Context window ceiling** (200K tokens for Haiku, 1M for Sonnet) | Medium | Cap patterns.md size, limit batch sizes, monitor token usage per run, periodic summarize/archive of old context. |
+| **Vendor interpretation lock-in** (playbooks tuned for Claude may work differently on other models) | Low | Acceptable tradeoff. Workspace pattern is model-agnostic even if playbook tuning isn't. |
+
+## Appendix: POC Results
+
+A working POC exists at https://github.com/webdevike/agent-poc demonstrating the full workspace pattern against sample HR events (terminations with compliance risks, benefits changes).
+
+### Sonnet 4.6 vs Haiku 4.5 Comparison (same batch, same brain)
+
+| | Sonnet 4.6 | Haiku 4.5 |
+|---|---|---|
+| Turns | 7 | 9 |
+| Input tokens | 26,436 | 35,346 |
+| Output tokens | 4,383 | 3,980 |
+| Cost | $0.145 | $0.044 |
+| CA final pay violation caught | Yes | Yes |
+| FMLA termination flagged | Yes | Yes |
+| Missing PIP + complaint flagged | Yes | Yes |
+| Cross-event WARN Act pattern | Yes | Yes |
+| Customer context updated | Yes | Yes |
+
+Both models caught all compliance issues, updated customer context with new patterns, and produced structured findings. Haiku is 70% cheaper with equivalent quality for this use case.
