@@ -1,0 +1,12 @@
+{
+  "name": "agent-poc",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "process": "node src/index.js",
+    "process:batch": "node src/index.js --batch"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0"
+  }
+}
