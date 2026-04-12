@@ -8,7 +8,7 @@ sandbox_image = modal.Image.debian_slim(python_version="3.12").pip_install(
 
 
 @app.function()
-@modal.web_endpoint(method="POST")
+@modal.fastapi_endpoint(method="POST")
 def execute(data: dict):
     """Execute code in an isolated Modal sandbox.
 
