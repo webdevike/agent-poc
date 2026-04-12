@@ -1,1 +1,4 @@
-node_modules/\nworkspaces/
+__pycache__/
+*.pyc
+.venv/
+.env
